@@ -139,7 +139,7 @@ If the output path is:
 output/image_map.html
 ```
 
-v2 also creates:
+ImaGi also creates:
 
 ```txt
 output/image_map.data.csv
