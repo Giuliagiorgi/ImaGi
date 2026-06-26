@@ -32,12 +32,15 @@ conda activate imagemap
 # Set directory
 cd C:\Users\banana\
 ```
+Clone the repository
+```bash
+git clone https://github.com/Giuliagiorgi/ImaGi.git
+```
 
 Install required packages
 
 ```bash
 pip install -r requirements.txt
-
 ```
 > Full list of required packages at **requirements.txt**, main folder.
 
