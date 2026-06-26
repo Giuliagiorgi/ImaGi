@@ -4,7 +4,7 @@
 <p align="center">
   <a href="https://scholar.google.com/citations?user=CoxLqv0AAAAJ&hl=en&oi=ao">Giulia Giorgi</a>
   and
-  <a href=" https://scholar-google-com.pros1.lib.unimi.it/citations?user=fLxWxDgAAAAJ&hl=it&oi=ao">Luca Giuffré</a>
+  <a href="https://scholar.google.com/citations?user=fLxWxDgAAAAJ&hl=en&oi=ao">Luca Giuffré</a>
  
 
 </p>
