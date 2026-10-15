@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>__HTML_TITLE__</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; font-family: Arial, Helvetica, sans-serif; background:#111; color:#eee; overflow:hidden; }
+  #toolbar { position:fixed; top:12px; left:12px; right:336px; z-index:10; display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:rgba(20,20,20,.92); border:1px solid rgba(255,255,255,.14); border-radius:12px; padding:10px; box-shadow:0 8px 32px rgba(0,0,0,.35); }
+  button, select, input, textarea { background:#222; color:#eee; border:1px solid #555; border-radius:8px; padding:8px 10px; }
+  button:hover { background:#333; cursor:pointer; }
+  label { font-size:13px; opacity:.95; }
+  #info { margin-left:auto; opacity:.75; font-size:13px; }
+  #canvas { width:100vw; height:100vh; display:block; background:radial-gradient(circle at center,#1b1b1b 0%,#0d0d0d 100%); }
+  .node image { cursor:grab; }
+  .node image:active { cursor:grabbing; }
+  .node text { font-size:10px; fill:#eee; paint-order:stroke; stroke:#000; stroke-width:3px; stroke-linejoin:round; pointer-events:none; }
+  .hidden { display:none; }
+  .selected rect { opacity:.95 !important; stroke:#fff; stroke-width:3px; }
+  .near rect { opacity:.75 !important; stroke:#fff; stroke-width:2px; }
+  .labels-hidden .node text { display:none; }
+  #sidepanel { position:fixed; top:12px; right:12px; bottom:12px; width:292px; z-index:11; background:rgba(20,20,20,.96); border:1px solid rgba(255,255,255,.14); border-radius:12px; padding:12px; overflow:auto; box-shadow:0 8px 32px rgba(0,0,0,.35); }
+  #preview { width:100%; max-height:240px; object-fit:contain; background:#000; border-radius:10px; margin:8px 0; }
+  #meta { font-size:12px; line-height:1.45; opacity:.9; word-break:break-word; }
+  #legend { max-height:160px; overflow:auto; font-size:12px; line-height:1.6; margin-top:10px; border-top:1px solid #444; padding-top:8px; }
+  .legend-item { display:flex; align-items:center; gap:6px; cursor:pointer; }
+  .swatch { width:12px; height:12px; border-radius:3px; display:inline-block; }
+  textarea { width:100%; min-height:54px; box-sizing:border-box; margin-top:6px; }
+  #selectedList { font-size:12px; opacity:.85; margin-top:8px; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <button onclick="resetView()">reset view</button>
+  <button onclick="fitVisible()">fit visible</button>
+  <button onclick="toggleLabels()">labels on/off</button>
+  <button onclick="exportPNG()">export png</button>
+  <button onclick="exportSVG()">export svg</button>
+  <button onclick="downloadData('csv')">export csv</button>
+  <button onclick="downloadData('json')">export json</button>
+  <button onclick="downloadSelected()">export selected</button>
+  <label>cluster <select id="clusterFilter" onchange="applyFilters()"></select></label>
+  <label>search <input id="searchBox" type="text" placeholder="filename, tag, note..." oninput="applyFilters()" /></label>
+  <label>size <input id="sizeSlider" type="range" min="24" max="180" value="__POINT_SIZE__" oninput="resizeNodes(this.value)" /></label>
+  <label>opacity <input id="opacitySlider" type="range" min="10" max="100" value="100" oninput="setNodeOpacity(this.value)" /></label>
+  <span id="info"></span>
+</div>
+
+<div id="sidepanel">
+  <div style="font-size:18px; font-weight:700;">Image inspector</div>
+  <img id="preview" alt="selected preview" />
+  <div id="meta">Click an image to inspect it. Ctrl/cmd-click to multi-select.</div>
+  <label>manual label/tag</label>
+  <input id="manualLabel" type="text" placeholder="e.g. domestic scenes" oninput="saveCurrentAnnotation()" style="width:100%; box-sizing:border-box; margin:6px 0;" />
+  <label>notes</label>
+  <textarea id="notes" placeholder="qualitative notes..." oninput="saveCurrentAnnotation()"></textarea>
+  <button onclick="highlightNearest()" style="width:100%; margin-top:8px;">highlight nearest</button>
+  <button onclick="clearSelection()" style="width:100%; margin-top:8px;">clear selection</button>
+  <div id="selectedList"></div>
+  <div id="legend"></div>
+</div>
+
+<svg id="canvas" xmlns="http://www.w3.org/2000/svg"><g id="viewport"></g></svg>
+
+<script>
+const data = __DATA_JSON__;
+const svg = document.getElementById("canvas");
+const viewport = document.getElementById("viewport");
+const clusterFilter = document.getElementById("clusterFilter");
+const searchBox = document.getElementById("searchBox");
+const info = document.getElementById("info");
+const preview = document.getElementById("preview");
+const meta = document.getElementById("meta");
+const manualLabel = document.getElementById("manualLabel");
+const notes = document.getElementById("notes");
+const selectedList = document.getElementById("selectedList");
+const legend = document.getElementById("legend");
+
+let pointSize = Number("__POINT_SIZE__");
+let transform = {x: window.innerWidth/2 - 140, y: window.innerHeight/2, k: 1};
+let isPanning = false, panStart = null, dragNode = null, dragStart = null;
+let labelsVisible = true;
+let nodeOpacity = 1;
+let currentIdx = null;
+let selected = new Set();
+let annotations = JSON.parse(localStorage.getItem(storageKey()) || "{}");
+
+data.forEach((d, i) => { d.idx = i; d.manual_label = annotations[i]?.label || ""; d.notes = annotations[i]?.notes || ""; });
+
+function storageKey() { return "image_map_annotations_" + document.title + "_" + data.length; }
+function saveAnnotations() { localStorage.setItem(storageKey(), JSON.stringify(annotations)); }
+function uniqueClusters() { return Array.from(new Set(data.map(d => d.cluster))).sort((a,b) => a-b); }
+function clusterColor(c) { if (c === -1) return "#888888"; const hue=(c*57)%360; return `hsl(${hue},70%,55%)`; }
+function updateTransform() { viewport.setAttribute("transform", `translate(${transform.x},${transform.y}) scale(${transform.k})`); }
+
+function initClusterFilter() {
+  clusterFilter.innerHTML = "";
+  const all = document.createElement("option"); all.value="all"; all.textContent="all"; clusterFilter.appendChild(all);
+  uniqueClusters().forEach(c => { const opt=document.createElement("option"); opt.value=String(c); opt.textContent=c===-1?"outliers (-1)":"cluster "+c; clusterFilter.appendChild(opt); });
+}
+
+function initLegend() {
+  const counts = {};
+  data.forEach(d => counts[d.cluster] = (counts[d.cluster] || 0) + 1);
+  legend.innerHTML = "<div style='font-weight:700; margin-bottom:4px;'>Cluster legend</div>";
+  uniqueClusters().forEach(c => {
+    const div = document.createElement("div"); div.className="legend-item"; div.onclick=()=>{ clusterFilter.value=String(c); applyFilters(); fitVisible(); };
+    div.innerHTML = `<span class="swatch" style="background:${clusterColor(c)}"></span><span>${c===-1?"outliers":"cluster "+c}: ${counts[c]} images</span>`;
+    legend.appendChild(div);
+  });
+}
+
+function render() {
+  viewport.innerHTML = "";
+  data.forEach((d, idx) => {
+    const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    g.classList.add("node");
+    g.setAttribute("data-cluster", d.cluster);
+    g.setAttribute("data-name", (d.name + " " + (d.manual_label||"") + " " + (d.notes||"")).toLowerCase());
+    g.setAttribute("transform", `translate(${d.x},${d.y})`);
+    g.dataset.idx = idx;
+
+    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    rect.setAttribute("x", -pointSize/2 - 3); rect.setAttribute("y", -pointSize/2 - 3);
+    rect.setAttribute("width", pointSize + 6); rect.setAttribute("height", pointSize + 6);
+    rect.setAttribute("rx", 8); rect.setAttribute("fill", clusterColor(d.cluster)); rect.setAttribute("opacity", 0.35 * nodeOpacity);
+
+    const img = document.createElementNS("http://www.w3.org/2000/svg", "image");
+    img.setAttribute("href", d.src); img.setAttribute("x", -pointSize/2); img.setAttribute("y", -pointSize/2);
+    img.setAttribute("width", pointSize); img.setAttribute("height", pointSize); img.setAttribute("opacity", nodeOpacity);
+    img.setAttribute("preserveAspectRatio", "xMidYMid meet");
+
+    const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+    title.textContent = `${d.name} | cluster ${d.cluster}`; img.appendChild(title);
+
+    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    text.setAttribute("x", 0); text.setAttribute("y", pointSize/2 + 14); text.setAttribute("text-anchor", "middle");
+    text.textContent = d.manual_label || (d.name.length > 24 ? d.name.slice(0,21)+"..." : d.name);
+
+    g.appendChild(rect); g.appendChild(img); g.appendChild(text); viewport.appendChild(g);
+  });
+  document.body.classList.toggle("labels-hidden", !labelsVisible);
+  applyFilters(); updateTransform();
+}
+
+function applyFilters() {
+  const selectedCluster = clusterFilter.value;
+  const q = searchBox.value.trim().toLowerCase();
+  let visible = 0;
+  document.querySelectorAll(".node").forEach(node => {
+    const clusterOK = selectedCluster === "all" || node.getAttribute("data-cluster") === selectedCluster;
+    const idx = Number(node.dataset.idx);
+    const haystack = (data[idx].name + " " + data[idx].path + " " + (data[idx].manual_label||"") + " " + (data[idx].notes||"")).toLowerCase();
+    const searchOK = !q || haystack.includes(q);
+    const show = clusterOK && searchOK;
+    node.classList.toggle("hidden", !show);
+    if (show) visible += 1;
+  });
+  info.textContent = `${visible} / ${data.length} images | ${selected.size} selected`;
+}
+
+function resizeNodes(v) { pointSize = Number(v); render(); }
+function setNodeOpacity(v) { nodeOpacity = Number(v)/100; render(); }
+function toggleLabels() { labelsVisible = !labelsVisible; document.body.classList.toggle("labels-hidden", !labelsVisible); }
+function resetView() { transform = {x: window.innerWidth/2 - 140, y: window.innerHeight/2, k: 1}; updateTransform(); }
+
+function fitVisible() {
+  const nodes = Array.from(document.querySelectorAll(".node:not(.hidden)")).map(n => data[Number(n.dataset.idx)]);
+  if (!nodes.length) return;
+  const xs = nodes.map(d => d.x), ys = nodes.map(d => d.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const w = Math.max(1, maxX-minX + pointSize*2), h = Math.max(1, maxY-minY + pointSize*2);
+  const availableW = window.innerWidth - 340, availableH = window.innerHeight - 40;
+  const k = Math.max(0.05, Math.min(20, 0.88 * Math.min(availableW/w, availableH/h)));
+  transform.k = k;
+  transform.x = (availableW/2) - ((minX+maxX)/2)*k;
+  transform.y = (window.innerHeight/2) - ((minY+maxY)/2)*k;
+  updateTransform();
+}
+
+function svgPoint(evt) { const pt=svg.createSVGPoint(); pt.x=evt.clientX; pt.y=evt.clientY; return pt.matrixTransform(viewport.getScreenCTM().inverse()); }
+
+svg.addEventListener("wheel", evt => { evt.preventDefault(); const scale=evt.deltaY<0?1.1:.9; transform.k*=scale; transform.k=Math.max(.05,Math.min(20,transform.k)); updateTransform(); }, {passive:false});
+svg.addEventListener("mousedown", evt => {
+  const node = evt.target.closest && evt.target.closest(".node");
+  if (node) {
+    const idx = Number(node.dataset.idx);
+    if (evt.ctrlKey || evt.metaKey) toggleSelected(idx); else inspect(idx, true);
+    dragNode = node; const p = svgPoint(evt); dragStart = {idx, dx:p.x-data[idx].x, dy:p.y-data[idx].y};
+  } else { isPanning=true; panStart={x:evt.clientX-transform.x, y:evt.clientY-transform.y}; }
+});
+svg.addEventListener("mousemove", evt => {
+  if (dragNode && dragStart) { const p=svgPoint(evt); const d=data[dragStart.idx]; d.x=p.x-dragStart.dx; d.y=p.y-dragStart.dy; dragNode.setAttribute("transform", `translate(${d.x},${d.y})`); }
+  else if (isPanning && panStart) { transform.x=evt.clientX-panStart.x; transform.y=evt.clientY-panStart.y; updateTransform(); }
+});
+window.addEventListener("mouseup", () => { dragNode=null; dragStart=null; isPanning=false; panStart=null; });
+
+function inspect(idx, selectSingle=false) {
+  currentIdx = idx;
+  if (selectSingle) { selected = new Set([idx]); updateSelectedStyles(); }
+  const d = data[idx]; preview.src = d.src;
+  meta.innerHTML = `<b>${d.name}</b><br>cluster: ${d.cluster}<br>x/y: ${d.x.toFixed(2)}, ${d.y.toFixed(2)}<br>path: ${d.path}`;
+  manualLabel.value = d.manual_label || ""; notes.value = d.notes || "";
+  updateSelectedList(); applyFilters();
+}
+function toggleSelected(idx) { selected.has(idx) ? selected.delete(idx) : selected.add(idx); inspect(idx, false); updateSelectedStyles(); }
+function updateSelectedStyles() { document.querySelectorAll(".node").forEach(n => n.classList.toggle("selected", selected.has(Number(n.dataset.idx)))); updateSelectedList(); applyFilters(); }
+function clearSelection() { selected.clear(); currentIdx=null; preview.removeAttribute("src"); meta.textContent="Click an image to inspect it. Ctrl/cmd-click to multi-select."; manualLabel.value=""; notes.value=""; document.querySelectorAll(".node").forEach(n => n.classList.remove("selected", "near")); updateSelectedList(); applyFilters(); }
+function updateSelectedList() { selectedList.textContent = selected.size ? `${selected.size} selected: ` + Array.from(selected).slice(0,6).map(i=>data[i].name).join(", ") + (selected.size>6?"...":"") : ""; }
+function saveCurrentAnnotation() {
+  if (currentIdx === null) return;
+  annotations[currentIdx] = {label: manualLabel.value, notes: notes.value};
+  data[currentIdx].manual_label = manualLabel.value; data[currentIdx].notes = notes.value;
+  saveAnnotations();
+  const node = document.querySelector(`.node[data-idx='${currentIdx}']`);
+  if (node) node.setAttribute("data-name", (data[currentIdx].name + " " + data[currentIdx].manual_label + " " + data[currentIdx].notes).toLowerCase());
+}
+function highlightNearest() {
+  if (currentIdx === null) return;
+  document.querySelectorAll(".node").forEach(n => n.classList.remove("near"));
+  const base = data[currentIdx];
+  const nearest = data.map((d,i)=>({i, dist: Math.hypot(d.x-base.x, d.y-base.y)})).filter(o=>o.i!==currentIdx).sort((a,b)=>a.dist-b.dist).slice(0,12);
+  nearest.forEach(o => { const n=document.querySelector(`.node[data-idx='${o.i}']`); if(n) n.classList.add("near"); });
+}
+
+function dataForDownload(onlySelected=false) {
+  const arr = onlySelected ? Array.from(selected).map(i => data[i]) : data;
+  return arr.map(d => ({name:d.name, path:d.path, x:d.x, y:d.y, cluster:d.cluster, manual_label:d.manual_label||"", notes:d.notes||""}));
+}
+function downloadBlob(filename, text, type) { const blob=new Blob([text], {type}); const url=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download=filename; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); }
+function downloadData(format) {
+  const rows = dataForDownload(false);
+  if (format === "json") return downloadBlob("image_map_data.json", JSON.stringify(rows, null, 2), "application/json");
+  const header = ["name","path","x","y","cluster","manual_label","notes"];
+  const csv = [header.join(",")].concat(rows.map(r => header.map(h => '"' + String(r[h] ?? "").replaceAll('"','""') + '"').join(","))).join("\n");
+  downloadBlob("image_map_data.csv", csv, "text/csv;charset=utf-8");
+}
+function downloadSelected() { const rows=dataForDownload(true); downloadBlob("image_map_selected.json", JSON.stringify(rows, null, 2), "application/json"); }
+
+function visibleExportNodes() {
+  return Array.from(document.querySelectorAll(".node:not(.hidden)"));
+}
+
+function buildExportClone() {
+  const clone = svg.cloneNode(true);
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+  clone.setAttribute("width", window.innerWidth);
+  clone.setAttribute("height", window.innerHeight);
+  clone.setAttribute("viewBox", `0 0 ${window.innerWidth} ${window.innerHeight}`);
+
+  clone.querySelectorAll(".hidden").forEach(n => n.remove());
+
+  const bg = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  bg.setAttribute("x", "0");
+  bg.setAttribute("y", "0");
+  bg.setAttribute("width", String(window.innerWidth));
+  bg.setAttribute("height", String(window.innerHeight));
+  bg.setAttribute("fill", "#111111");
+  clone.insertBefore(bg, clone.firstChild);
+
+  if (!labelsVisible) {
+    clone.querySelectorAll("text").forEach(t => t.remove());
+  }
+
+  const clonedNodes = Array.from(clone.querySelectorAll(".node"));
+  clonedNodes.forEach(node => {
+    const idx = Number(node.dataset.idx);
+    const img = node.querySelector("image");
+    if (!img || Number.isNaN(idx) || !data[idx]) return;
+
+    const exportSrc = data[idx].export_src || data[idx].src;
+    img.setAttribute("href", exportSrc);
+    img.setAttributeNS("http://www.w3.org/1999/xlink", "href", exportSrc);
+
+    const textEl = node.querySelector("text");
+    if (textEl) {
+      textEl.setAttribute("fill", "#eeeeee");
+      textEl.setAttribute("font-family", "Arial, Helvetica, sans-serif");
+      textEl.setAttribute("paint-order", "stroke");
+      textEl.setAttribute("stroke", "#000000");
+      textEl.setAttribute("stroke-width", "3");
+      textEl.setAttribute("stroke-linejoin", "round");
+    }
+  });
+
+  return clone;
+}
+
+function exportSVG() {
+  const clone = buildExportClone();
+  const source = new XMLSerializer().serializeToString(clone);
+  downloadBlob("image_map.svg", source, "image/svg+xml;charset=utf-8");
+}
+
+function exportPNG() {
+  const clone = buildExportClone();
+  const source = new XMLSerializer().serializeToString(clone);
+  const url = URL.createObjectURL(new Blob([source], {type:"image/svg+xml;charset=utf-8"}));
+
+  const image = new Image();
+  image.onload = function() {
+    const canvas = document.createElement("canvas");
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#111111";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(image, 0, 0);
+    URL.revokeObjectURL(url);
+
+    canvas.toBlob(blob => {
+      const pngUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = pngUrl;
+      a.download = "image_map.png";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(pngUrl);
+    }, "image/png");
+  };
+  image.src = url;
+}
+
+initClusterFilter(); initLegend(); render(); fitVisible();
+</script>
+</body>
+</html>
